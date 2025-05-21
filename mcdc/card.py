@@ -33,7 +33,7 @@ class InputCard:
 
 
 class NuclideCard(InputCard):
-    def __init__(self, G=1, J=0, name=None):
+    def __init__(self, G=1, J=0, name=None, temperature=294):
         InputCard.__init__(self, "Nuclide")
 
         # Continuous energy?
@@ -64,10 +64,11 @@ class NuclideCard(InputCard):
         self.flags = []
         self.distribution = ""
         self.name = ""
+        self.temperature = temperature
 
 
 class MaterialCard(InputCard):
-    def __init__(self, N_nuclide, G=1, J=0):
+    def __init__(self, N_nuclide, G=1, J=0, temperature=294):
         InputCard.__init__(self, "Material")
 
         # Set card data
@@ -75,6 +76,7 @@ class MaterialCard(InputCard):
         self.N_nuclide = N_nuclide
         self.nuclide_IDs = np.zeros(N_nuclide, dtype=int)
         self.nuclide_densities = np.zeros(N_nuclide, dtype=float)
+        self.fissionable = False
         self.G = G
         self.J = J
         self.speed = np.zeros(G)
@@ -91,6 +93,7 @@ class MaterialCard(InputCard):
         self.uq = False
         self.flags = []
         self.distribution = ""
+        self.temperature = temperature
 
 
 class RegionCard(InputCard):

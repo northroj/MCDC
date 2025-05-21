@@ -9,6 +9,7 @@ import mcdc.global_ as global_
 import h5py, math, mpi4py, os
 import numpy as np
 import scipy as sp
+import xml.etree.ElementTree as ET
 
 from pathlib import Path
 
@@ -44,9 +45,11 @@ from mcdc.constant import (
     WW_PREVIOUS,
     WW_USER,
     WW_WOLLABER,
+    AVOGADRO,
 )
-from mcdc.print_ import print_error
+from mcdc.print_ import print_error, print_warning
 import mcdc.type_ as type_
+from nuclear_data import load_h5_from_xml
 
 
 def nuclide(
@@ -227,6 +230,8 @@ def material(
     chi_d=None,
     speed=None,
     decay=None,
+    temperature=294.0,
+    density=0.0,
 ):
     """
     Create a material
@@ -236,8 +241,10 @@ def material(
 
     Parameters
     ----------
-    nuclides : list of tuple of (dictionary, float), optional
-        List of pairs of nuclide card and its density [/barn-cm].
+    nuclides : list of tuple of (dictionary/string, float), optional
+        List of pairs of nuclide card/name and its density [/barn-cm].
+        If density parameter is set, nuclide density becomes atom fraction.
+        Provide a nuclide card for multigroup and a string i.e. "H1" for continuous energy.
     capture : numpy.ndarray (1D), optional
         Capture macroscopic cross-section [/cm].
     scatter : numpy.ndarray (2D), optional
@@ -258,6 +265,12 @@ def material(
         Energy group speed [cm/s].
     decay : numpy.ndarray (1D), optional
         Precursor group decay constant [/s].
+    temperature : float, optional
+        Temperature of the material in Kelvin, Use with CE only
+    density : float, optional
+        Density of composite material [g/cc]
+        If none provided, nuclide densities are in [atoms/barn-cm].
+        Use with CE only
 
     Returns
     -------
@@ -268,6 +281,7 @@ def material(
     --------
     mcdc.nuclide : A material can be defined as a collection of nuclides.
     """
+
     # If nuclides are not given, and macroscopic constants are given instead,
     # create a nuclide card and set a single-nuclide material
     if nuclides is None:
@@ -284,9 +298,47 @@ def material(
             decay,
         )
         nuclides = [[card_nuclide, 1.0]]
-
+    
     # Number of nuclides
     N_nuclide = len(nuclides)
+
+    # Convert atom fraction and weight fraction to atoms/b-cm
+    if density != 0.0:
+        print_warning("Molar masses are currently approximate when using atom/weight fractions")
+        # Extract molar masses from nuclide names (e.g., "U235" -> 235), FIX: do something more accurate later
+        molar_masses = []
+        for name, _ in nuclides:
+            for j in range(len(name)):
+                if name[j].isdigit():
+                    mass_str = name[j:]
+                    if mass_str.isdigit():
+                        mass_str = int(mass_str)
+                        if mass_str == 0:
+                            mass_str = 12 # FIX: this is a hacky solution to C0, will need to be adjusted for natural compositions
+                        molar_masses.append(mass_str)
+                        break
+            else:
+                print_error(f"Invalid nuclide name '{name}'. Expected format like 'U235'.")
+
+        is_weight_fraction = any(nuclide[1] < 0.0 for nuclide in nuclides)
+        # Convert weight fraction to atom fraction
+        if is_weight_fraction:
+            for i in range(N_nuclide):
+                nuclides[i][1] /= molar_masses[i]
+
+        # Normalize nuclide densities (weight or atom fraction)
+        average_molar_mass = 0.0
+        total_frac = sum(nuclide[1] for nuclide in nuclides)
+        for i in range(N_nuclide):
+            nuclides[i][1] /= total_frac  # normalize atom fraction
+            average_molar_mass += molar_masses[i] * nuclides[i][1]
+
+        # Calculate composite atom density
+        N_total = density * AVOGADRO * 1e-24 / average_molar_mass
+
+        #Convert to atoms/barn-cm for each nuclide
+        for i in range(N_nuclide):
+            nuclides[i][1] = nuclides[i][1] * N_total
 
     # Continuous energy mode?
     if isinstance(nuclides[0][0], str):
@@ -302,6 +354,13 @@ def material(
         # Default values
         card.J = 6
 
+        # load the cross_sections.xml file.
+        xs_path = global_.input_deck.setting["xs_path"]
+        if xs_path == "":
+            print_error("Set the path to the cross_sections.xml file before calling material cards.")
+        tree = ET.parse(xs_path)
+        root = tree.getroot()
+
         # Set the nuclides
         for i in range(N_nuclide):
             nuc_name = nuclides[i][0]
@@ -311,33 +370,25 @@ def material(
             if not nuclide_registered(nuc_name):
                 nuc_card = NuclideCard()
                 nuc_card.name = nuc_name
+                nuc_card.temperature = temperature
 
                 # Set ID
                 nuc_card.ID = len(global_.input_deck.nuclides)
 
                 # Default values
                 nuc_card.J = 6
-
-                # Check if the nuclide is available in the nuclear data library
-                dir_name = os.getenv("MCDC_XSLIB")
-                if dir_name == None:
-                    print_error(
-                        "Continuous energy data directory not configured \n       "
-                        "see https://cement-psaapgithubio.readthedocs.io/en/latest"
-                        "/install.html#configuring-continuous-energy-library \n"
-                    )
+                
+                # Check if the nuclide is available in the nuclear data library and load it
+                nuclide_h5 = load_h5_from_xml(root, name=nuc_name, category="neutron")
 
                 # Fissionable flag
-                lib_file_name = dir_name + "/" + nuc_name + ".h5"
-                if not Path(lib_file_name).is_file():
-                    print_error(f"Nuclide data not found: {nuc_name}")
-                with h5py.File(lib_file_name, "r") as f:
-                    if max(f["fission"][:]) > 0.0:
-                        nuc_card.fissionable = True
-                        card.fissionable = True
+                if "total_nu" in nuclide_h5[nuc_name]:
+                    nuc_card.fissionable = True
+                    card.fissionable = True
 
                 # Add to deck
                 global_.input_deck.nuclides.append(nuc_card)
+                nuclide_h5.close()
             else:
                 nuc_card = get_nuclide(nuc_name)
 

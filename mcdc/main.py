@@ -7,6 +7,7 @@ from matplotlib import colors as mpl_colors
 import scipy.fft as spfft
 from scipy.stats.qmc import Halton
 import cvxpy as cp
+import xml.etree.ElementTree as ET
 
 from mcdc.card import UniverseCard
 from mcdc.print_ import (
@@ -38,6 +39,8 @@ import mcdc.src.geometry as geometry
 
 import mcdc.loop as loop
 from mcdc.print_ import print_banner, print_msg, print_runtime, print_header_eigenvalue
+
+from mcdc.nuclear_data import load_h5_from_xml, select_temperature
 
 # Get input_deck
 import mcdc.global_ as mcdc_
@@ -578,51 +581,121 @@ def prepare():
                 copy_field(mcdc["nuclides"][i], input_deck.nuclides[i], name)
 
         # CE data (load data from XS library)
-        dir_name = os.getenv("MCDC_XSLIB")
         if mode_CE:
             nuc_name = input_deck.nuclides[i].name
-            with h5py.File(dir_name + "/" + nuc_name + ".h5", "r") as f:
-                # Atomic weight ratio
-                mcdc["nuclides"][i]["A"] = f["A"][()]
-                # Energy grids
-                for name in [
-                    "E_xs",
-                    "E_nu_p",
-                    "E_nu_d",
-                    "E_chi_p",
-                    "E_chi_d1",
-                    "E_chi_d2",
-                    "E_chi_d3",
-                    "E_chi_d4",
-                    "E_chi_d5",
-                    "E_chi_d6",
-                ]:
-                    mcdc["nuclides"][i]["N" + name] = len(f[name][:])
-                    mcdc["nuclides"][i][name][: len(f[name][:])] = f[name][:]
 
-                # XS
-                for name in ["capture", "scatter", "fission"]:
-                    mcdc["nuclides"][i]["ce_" + name][: len(f[name][:])] = f[name][:]
-                    mcdc["nuclides"][i]["ce_total"][: len(f[name][:])] += f[name][:]
+            # load the cross_sections.xml file.
+            xs_path = mcdc_.input_deck.setting["xs_path"]
+            tree = ET.parse(xs_path)
+            root = tree.getroot()
 
-                # Fission production
-                mcdc["nuclides"][i]["ce_nu_p"][: len(f["nu_p"][:])] = f["nu_p"][:]
-                for j in range(6):
-                    mcdc["nuclides"][i]["ce_nu_d"][j][: len(f["nu_d"][j, :])] = f[
-                        "nu_d"
-                    ][j, :]
+            f = load_h5_from_xml(root, name=nuc_name, category="neutron")
+        
+            # Atomic weight ratio
+            # FIX: this is an approximation since the awr doesn't exist in openmc's data files
+            for j in range(len(nuc_name)):
+                if nuc_name[j].isdigit():
+                    mass_str = nuc_name[j:]
+                    if mass_str.isdigit():
+                        mass_str = int(mass_str)
+                        if mass_str == 0:
+                            mass_str = 12 # FIX: this is a hacky solution to C0, will need to be adjusted for natural compositions
+                        break
+            else:
+                print_error(f"Failed to set atomic weight ratio")
+            mcdc["nuclides"][i]["A"] = float(mass_str)
 
-                # Fission spectrum
-                mcdc["nuclides"][i]["ce_chi_p"][: len(f["chi_p"][:])] = f["chi_p"][:]
-                for j in range(6):
-                    mcdc["nuclides"][i]["ce_chi_d%i" % (j + 1)][
-                        : len(f["chi_d%i" % (j + 1)][:])
-                    ] = f["chi_d%i" % (j + 1)][:]
+            # Choose temperature
+            temperature_string = select_temperature(f, nuc_name, i)
 
-                # Decay
-                mcdc["nuclides"][i]["ce_decay"][: len(f["decay_rate"][:])] = f[
-                    "decay_rate"
-                ][:]
+            # Energy grid
+            energy_grid = f[nuc_name]["energy"][temperature_string][:]
+            mcdc["nuclides"][i]["NE_xs"] = len(energy_grid)
+            mcdc["nuclides"][i]["E_xs"][: len(energy_grid)] = energy_grid
+
+            '''
+            # Energy grids
+            for name in [
+                "E_xs",
+                "E_nu_p",
+                "E_nu_d",
+                "E_chi_p",
+                "E_chi_d1",
+                "E_chi_d2",
+                "E_chi_d3",
+                "E_chi_d4",
+                "E_chi_d5",
+                "E_chi_d6",
+            ]:
+                mcdc["nuclides"][i]["N" + name] = len(f[name][:])
+                mcdc["nuclides"][i][name][: len(f[name][:])] = f[name][:]
+            '''
+
+            reactions = f[nuc_name]["reactions"]
+
+            # Elastic scattering (MT 2)
+            if "reaction_002" in reactions:
+                elastic_scattering_xs = reactions["reaction_002"][temperature_string]["xs"][:]
+                mcdc["nuclides"][i]["ce_scatter"][: len(elastic_scattering_xs)] = elastic_scattering_xs
+            else:
+                print_warning(f"Nuclide {nuc_name} has no elastic scattering data (MT 2)")
+
+            # Capture (MT 102+...+117) These need to be separated if outgoing photons/ions are important
+            capture_mt_range = range(102, 118)
+            capture_xs_sum = None
+            for mt in capture_mt_range:
+                reaction_name = f"reaction_{mt}"
+                if reaction_name in reactions:
+                    xs = reactions[reaction_name][temperature_string]["xs"][:]
+
+                    if capture_xs_sum is None:
+                        # First valid xs defines the length of the output array
+                        capture_xs_sum = np.zeros_like(xs)
+                    elif len(xs) < len(capture_xs_sum):
+                        # Pad xs to match the longest one seen so far
+                        padded_xs = np.zeros_like(capture_xs_sum)
+                        padded_xs[:len(xs)] = xs
+                        xs = padded_xs
+                    elif len(xs) > len(capture_xs_sum):
+                        # Pad the existing sum to match new longer xs
+                        padded_sum = np.zeros_like(xs)
+                        padded_sum[:len(capture_xs_sum)] = capture_xs_sum
+                        capture_xs_sum = padded_sum
+
+                    capture_xs_sum += xs
+
+            # Write result to MCDC buffer if any cross sections were found
+            if capture_xs_sum is not None:
+                mcdc["nuclides"][i]["ce_capture"][:len(capture_xs_sum)] = capture_xs_sum
+            else:
+                print_warning(f"No capture cross sections found for {nuc_name} at {temperature_string}")
+
+            # Fission (MT 18)
+            if "reaction_018" in reactions:
+                fission_xs = reactions["reaction_018"][temperature_string]["xs"][:]
+                mcdc["nuclides"][i]["ce_fission"][: len(fission_xs)] = fission_xs
+
+            '''
+            # Fission production
+            mcdc["nuclides"][i]["ce_nu_p"][: len(f["nu_p"][:])] = f["nu_p"][:]
+            for j in range(6):
+                mcdc["nuclides"][i]["ce_nu_d"][j][: len(f["nu_d"][j, :])] = f[
+                    "nu_d"
+                ][j, :]
+
+            # Fission spectrum
+            mcdc["nuclides"][i]["ce_chi_p"][: len(f["chi_p"][:])] = f["chi_p"][:]
+            for j in range(6):
+                mcdc["nuclides"][i]["ce_chi_d%i" % (j + 1)][
+                    : len(f["chi_d%i" % (j + 1)][:])
+                ] = f["chi_d%i" % (j + 1)][:]
+
+            # Decay
+            mcdc["nuclides"][i]["ce_decay"][: len(f["decay_rate"][:])] = f[
+                "decay_rate"
+            ][:]
+            '''
+            f.close()
 
     # =========================================================================
     # Materials

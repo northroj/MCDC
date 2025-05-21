@@ -33,5 +33,9 @@ from mcdc.main import (
     recombine_tallies,
 )
 
+from mcdc.nuclear_data import (
+    set_cross_sections_xml,
+)
+
 # Temporarily commenting out so docs will build
 # __version__ = importlib.metadata.version("mcdc")

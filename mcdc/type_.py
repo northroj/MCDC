@@ -2,6 +2,7 @@ import h5py
 import math
 import numpy as np
 import os
+import xml.etree.ElementTree as ET
 
 from mpi4py import MPI
 from mpi4py.util.dtlib import from_numpy_dtype
@@ -10,6 +11,9 @@ from numba import njit
 from mcdc.print_ import print_error
 
 from mcdc.constant import WW_PREVIOUS
+
+import mcdc.global_ as global2_ # Maybe this should be called something else, but global_ is already in use below
+from mcdc.nuclear_data import load_h5_from_xml, select_temperature
 
 # ==============================================================================
 # Basic types
@@ -345,21 +349,35 @@ def make_type_nuclide(input_deck):
         NE_chi_d4 = 0
         NE_chi_d5 = 0
         NE_chi_d6 = 0
-
-        dir_name = os.getenv("MCDC_XSLIB")
+        
         for nuc in input_deck.nuclides:
-            with h5py.File(dir_name + "/" + nuc.name + ".h5", "r") as f:
-                NE_xs = max(NE_xs, len(f["E_xs"][:]))
-                NE_nu_p = max(NE_nu_p, len(f["E_nu_p"][:]))
-                NE_nu_d = max(NE_nu_d, len(f["E_nu_d"][:]))
-                NE_chi_p = max(NE_chi_p, len(f["E_chi_p"][:]))
-                NE_chi_d1 = max(NE_chi_d1, len(f["E_chi_d1"][:]))
-                NE_chi_d2 = max(NE_chi_d2, len(f["E_chi_d2"][:]))
-                NE_chi_d3 = max(NE_chi_d3, len(f["E_chi_d3"][:]))
-                NE_chi_d4 = max(NE_chi_d4, len(f["E_chi_d4"][:]))
-                NE_chi_d5 = max(NE_chi_d5, len(f["E_chi_d5"][:]))
-                NE_chi_d6 = max(NE_chi_d6, len(f["E_chi_d6"][:]))
+            nuc_name = nuc.name
 
+            # load the cross_sections.xml file.
+            xs_path = global2_.input_deck.setting["xs_path"]
+            tree = ET.parse(xs_path)
+            root = tree.getroot()
+
+            f = load_h5_from_xml(root, name=nuc_name, category="neutron")
+
+            temperature_string = select_temperature(f, nuc_name, nuc.ID)
+
+            # Energy grid
+            energy_grid = f[nuc_name]["energy"][temperature_string][:]
+            NE_xs = max(NE_xs, len(energy_grid))
+
+            # FIX: I need to fix this before PR
+            '''
+            NE_nu_p = max(NE_nu_p, len(f["E_nu_p"][:]))
+            NE_nu_d = max(NE_nu_d, len(f["E_nu_d"][:]))
+            NE_chi_p = max(NE_chi_p, len(f["E_chi_p"][:]))
+            NE_chi_d1 = max(NE_chi_d1, len(f["E_chi_d1"][:]))
+            NE_chi_d2 = max(NE_chi_d2, len(f["E_chi_d2"][:]))
+            NE_chi_d3 = max(NE_chi_d3, len(f["E_chi_d3"][:]))
+            NE_chi_d4 = max(NE_chi_d4, len(f["E_chi_d4"][:]))
+            NE_chi_d5 = max(NE_chi_d5, len(f["E_chi_d5"][:]))
+            NE_chi_d6 = max(NE_chi_d6, len(f["E_chi_d6"][:]))
+            '''
     # Get MG sizes
     if mode_MG:
         G = input_deck.materials[0].G

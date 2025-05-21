@@ -42,6 +42,12 @@ class InputDeck:
             "tag": "Setting",
             "mode_MG": True,
             "mode_CE": False,
+            "xs_path": "",
+            # Set particle types to transport (only neutrons implemented)
+            "transport_neutrons": True, # unimplemented particles still affect CE data
+            "transport_photons": False,
+            "transport_electrons": False,
+            "transport_ions": False,
             "N_particle": 0,
             "N_batch": 1,
             "rng_seed": 1,
